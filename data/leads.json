@@ -1,0 +1,7 @@
+[
+  {"firstName":"Olivia","lastName":"Bennett","email":"olivia.bennett@example.com","phoneNumber":"+1 (415) 555-1000","submissionId":"sub_02400","updatedAt":"2026-08-23T09:20:00Z","status":"New","dynamic":{"campaign":"Spring launch","region":"North America","interest":"Platform"}},
+  {"firstName":"Ethan","lastName":"Brooks","email":"ethan.brooks@example.com","phoneNumber":"+1 (415) 555-1001","submissionId":"sub_02401","updatedAt":"2026-08-22T14:48:00Z","status":"Contacted","dynamic":{"campaign":"Partner referral","region":"EMEA","interest":"Integrations"}},
+  {"firstName":"Mia","lastName":"Thompson","email":"mia.thompson@example.com","phoneNumber":"+1 (415) 555-1002","submissionId":"sub_02402","updatedAt":"2026-08-21T16:12:00Z","status":"Qualified","dynamic":{"campaign":"Demo request","region":"APAC","interest":"Pricing"}},
+  {"firstName":"Noah","lastName":"Williams","email":"noah.williams@example.com","phoneNumber":"+1 (415) 555-1003","submissionId":"sub_02403","updatedAt":"2026-08-20T11:35:00Z","status":"New","dynamic":{"campaign":"Spring launch","region":"North America","interest":"Platform"}},
+  {"firstName":"Sophia","lastName":"Carter","email":"sophia.carter@example.com","phoneNumber":"+1 (415) 555-1004","submissionId":"sub_02404","updatedAt":"2026-08-19T08:05:00Z","status":"Qualified","dynamic":{"campaign":"Partner referral","region":"EMEA","interest":"Integrations"}}
+]
