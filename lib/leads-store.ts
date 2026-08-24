@@ -1,7 +1,9 @@
 import { create } from 'zustand'
 
 export type Environment = 'Dev' | 'UAT' | 'Prod'
-export type LeadStatus = 'New' | 'Contacted' | 'Qualified' | 'Disqualified'
+/** The canonical pipeline stages, but any string an API returns is accepted —
+ *  the union only exists to keep autocomplete useful. */
+export type LeadStatus = 'New' | 'Contacted' | 'Qualified' | 'Disqualified' | (string & {})
 export type Lead = { firstName: string; lastName: string; email: string; phoneNumber: string; submissionId: string; updatedAt: string; status: LeadStatus; dynamic: Record<string, string> }
 
 /** What GET /submissionbyid adds on top of the record the list endpoint returns. */

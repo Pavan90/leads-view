@@ -171,7 +171,9 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 /* --- KPI row -------------------------------------------------------------- */
 .kpi-row {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  /* Tile count follows the statuses present in the data, not a fixed six:
+     auto-fit lays out however many there are and wraps past the row width. */
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
   border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--card); overflow: hidden;
 }
@@ -278,6 +280,9 @@ td code { color: var(--text-3); font-family: ui-monospace, 'SF Mono', monospace;
 .status-contacted { color: var(--st-contacted-ink); background: var(--st-contacted-bg); }
 .status-qualified { color: var(--st-qualified-ink); background: var(--st-qualified-bg); }
 .status-disqualified { color: var(--st-disqualified-ink); background: var(--st-disqualified-bg); }
+/* Any stage outside the known pipeline: readable, but not colour-coded, so a
+   hue is never invented for a status whose meaning we do not know. */
+.status-other { color: var(--text-2); background: var(--raised); }
 
 .tag {
   display: inline-block; max-width: 150px; padding: 2px 7px; border-radius: 4px;

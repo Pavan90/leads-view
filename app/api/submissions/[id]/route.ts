@@ -1,12 +1,81 @@
 import { NextResponse } from 'next/server'
 import leads from '@/data/leads.json'
+import type { Lead } from '@/lib/leads-store'
+import { baseUrl, normalizeLead, normalizeSubmission, type RawRecord, type UpstreamEnv } from '@/lib/upstream'
 
 /**
- * Mock of the upstream GET /submissionbyid endpoint. It returns the same lead
- * record the list endpoint serves, plus the per-submission detail the list call
- * omits. Swap the body for the real fetch when wiring the live host — the
- * response shape below is what the drawer renders against.
+ * GET /api/submissions/:id — one submission, with the detail the list
+ * endpoint omits. Backs the search-by-ID lookup and the row drawer.
+ *
+ * ── Going live ────────────────────────────────────────────────────────
+ * Same switch as the list route: set LEADS_API_URL* in `.env.local` and
+ * this calls the real endpoint. Change the path in `upstreamUrl` if yours
+ * is not `/submissionbyid`.
+ *
+ * The response goes through `normalizeSubmission`, so you do not need to
+ * match the mock's shape. Whatever the API returns beyond the core lead
+ * fields is rendered in the drawer's "Submission details" list, and an
+ * array under `history` / `timeline` / `events` / `activity` becomes the
+ * activity timeline. Extra fields appear with no code change; missing ones
+ * are simply omitted.
+ *
+ * A 404 from upstream is passed through as a 404 — the UI renders its
+ * "Submission not found" state from that status specifically.
+ * ─────────────────────────────────────────────────────────────────────
  */
+
+/** Adjust to match the real path/query. */
+const upstreamUrl = (root: string, id: string) =>
+  `${root}/submissionbyid?submissionId=${encodeURIComponent(id)}`
+
+/** Mock-only: makes the loading state visible locally. Ignored when live. */
+const MOCK_LATENCY_MS = 450
+
+export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params
+  const { searchParams } = new URL(request.url)
+  const environment = (searchParams.get('environment') || 'Prod') as UpstreamEnv
+  const root = baseUrl(environment)
+
+  if (root) {
+    const response = await fetch(upstreamUrl(root, id), {
+      headers: {
+        Authorization: request.headers.get('authorization') ?? '',
+        accept: 'application/json',
+      },
+      cache: 'no-store',
+    })
+    if (response.status === 404) {
+      return NextResponse.json({ error: 'Submission not found', submissionId: id }, { status: 404 })
+    }
+    if (!response.ok) {
+      return NextResponse.json(
+        { error: 'Upstream submission request failed', status: response.status },
+        { status: response.status },
+      )
+    }
+    const payload = await response.json()
+    // Some APIs wrap the record in an envelope; unwrap a single known key.
+    const record = payload?.submission ?? payload?.data ?? payload?.item ?? payload
+    return NextResponse.json(normalizeSubmission(record, environment))
+  }
+
+  // ── Mock path: served only while no LEADS_API_URL* is configured. ──
+  await new Promise((resolve) => setTimeout(resolve, MOCK_LATENCY_MS))
+
+  // Match through the normaliser so the fixture can be swapped for a sample of
+  // real payloads without this lookup caring what the fields are called.
+  const rows = leads as RawRecord[]
+  const match = rows.find((row) => normalizeLead(row).submissionId.toLowerCase() === id.toLowerCase())
+  if (!match) {
+    return NextResponse.json({ error: 'Submission not found', submissionId: id }, { status: 404 })
+  }
+  return NextResponse.json(normalizeSubmission({ ...match, ...mockDetail(normalizeLead(match)) }, environment))
+}
+
+/* ------------------------------------------------------------------ *
+ * Mock detail generation — delete once the real endpoint is wired in.
+ * ------------------------------------------------------------------ */
 
 const SOURCES = ['Web form', 'Landing page', 'Partner API', 'Import']
 const OWNERS = ['A. Rivera', 'J. Okafor', 'M. Lindqvist', 'Unassigned']
@@ -18,30 +87,14 @@ function hash(value: string) {
   return out
 }
 
-export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
-  const { id } = await params
-  const { searchParams } = new URL(request.url)
-  const environment = searchParams.get('environment') || 'Prod'
-
-  // The real endpoint is a network hop; keep a small delay so the loading state
-  // is exercised in local development rather than flashing past.
-  await new Promise((resolve) => setTimeout(resolve, 450))
-
-  const lead = leads.find((row) => row.submissionId.toLowerCase() === id.toLowerCase())
-  if (!lead) {
-    return NextResponse.json({ error: 'Submission not found', submissionId: id }, { status: 404 })
-  }
-
+function mockDetail(lead: Lead) {
   const seed = hash(lead.submissionId)
   const updatedAt = new Date(lead.updatedAt)
   const createdAt = new Date(updatedAt.getTime() - (seed % 72) * 3_600_000)
-
-  return NextResponse.json({
-    ...lead,
-    environment,
+  return {
     detail: {
       source: SOURCES[seed % SOURCES.length],
-      formName: `${lead.dynamic.campaign ?? 'General'} enquiry`,
+      formName: `${Object.values(lead.dynamic)[0] ?? 'General'} enquiry`,
       formVersion: `v${(seed % 4) + 1}.${seed % 10}`,
       assignedTo: OWNERS[(seed >>> 3) % OWNERS.length],
       score: 40 + (seed % 61),
@@ -56,5 +109,5 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       { at: new Date(createdAt.getTime() + 900_000).toISOString(), event: 'Routed to sales queue' },
       { at: lead.updatedAt, event: `Status set to ${lead.status}` },
     ],
-  })
+  }
 }
