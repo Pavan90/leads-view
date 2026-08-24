@@ -31,9 +31,10 @@ export default function Page() {
   const dateRange = useMemo(() => getRangeDates(timeRange), [timeRange])
   const sourceLeads = apiLeads
   const filteredLeads = useMemo(() => sourceLeads.filter((lead) => { const haystack = `${lead.firstName} ${lead.lastName} ${lead.email} ${lead.phoneNumber} ${lead.submissionId} ${Object.values(lead.dynamic).join(' ')}`.toLowerCase(); return haystack.includes(search.toLowerCase()) && (status === 'All statuses' || lead.status === status) }), [sourceLeads, search, status])
-  const visibleLeads = filteredLeads.slice(page * pageSize, page * pageSize + pageSize); const totalPages = Math.max(1, Math.ceil(filteredLeads.length / pageSize))
+  const visibleLeads = useMemo(() => filteredLeads.slice(page * pageSize, page * pageSize + pageSize), [filteredLeads, page, pageSize]); const totalPages = Math.max(1, Math.ceil(filteredLeads.length / pageSize))
   const columns = useMemo<ColumnDef<Lead>[]>(() => [{ accessorKey: 'firstName', header: 'First name' }, { accessorKey: 'lastName', header: 'Last name' }, { accessorKey: 'email', header: 'Email' }, { accessorKey: 'phoneNumber', header: 'Phone number' }, { accessorKey: 'submissionId', header: 'Submission ID' }, { accessorKey: 'updatedAt', header: 'Updated at', cell: ({ getValue }) => formatDate(getValue<string>()) }, { accessorKey: 'status', header: 'Status' }, ...dynamicFields.map((field) => ({ id: field, header: field, accessorFn: (row: Lead) => row.dynamic[field] }))], [])
-  const table = useReactTable({ data: visibleLeads, columns, getCoreRowModel: getCoreRowModel() })
+  const coreRowModel = useMemo(() => getCoreRowModel(), [])
+  const table = useReactTable({ data: visibleLeads, columns, getCoreRowModel: coreRowModel })
   function changeEnvironment(next: Environment) { setEnvironment(next); setPage(0); setLoading(true); fetchLeads(next, pageSize).finally(() => setLoading(false)) }
   function refresh() { setLoading(true); fetchLeads(environment, pageSize).finally(() => setLoading(false)) }
   const resetPage = () => setPage(0)
