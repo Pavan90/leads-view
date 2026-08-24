@@ -6,29 +6,53 @@ import { useLeadsStore, type Lead, type Environment } from '@/lib/leads-store'
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts'
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart'
 import {
-  Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Download, Layers, Loader2,
-  Moon, RefreshCw, Search, Sun, X, Zap,
+  Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Download, Hash,
+  Layers, Loader2, Moon, RefreshCw, Search, Sun, X, Zap,
 } from 'lucide-react'
 
 type TimeRange = 'Today' | 'Yesterday' | 'Last 7 days' | 'Last 14 days' | 'Last 30 days'
-type Breakdown = 'campaign' | 'region' | 'interest'
 
 const environments: Environment[] = ['Dev', 'UAT', 'Prod']
 const timeRanges: TimeRange[] = ['Today', 'Yesterday', 'Last 7 days', 'Last 14 days', 'Last 30 days']
-const statuses = ['All statuses', 'New', 'Contacted', 'Qualified', 'Disqualified'] as const
-const breakdowns: Breakdown[] = ['campaign', 'region', 'interest']
-const statusOrder = ['New', 'Contacted', 'Qualified', 'Disqualified'] as const
+const ALL_STATUSES = 'All statuses'
 
-// The mock API serves a fixed August 2026 window, so "now" is pinned rather than
-// read from the clock — a live Date() would also desync SSR and hydration.
-const NOW = new Date('2026-08-23T16:42:00Z')
+// Nothing below is assumed to be present in the data. These are the stages we
+// know how to colour and the order we prefer to show them in; any other status
+// an API returns is still counted, filtered and displayed, just in neutral.
+const KNOWN_STATUSES = ['New', 'Contacted', 'Qualified', 'Disqualified']
+// Dynamic form fields vary per tenant, so the breakdown dimensions are read
+// from the data. These names only decide ordering when they happen to exist.
+const PREFERRED_BREAKDOWNS = ['campaign', 'region', 'interest']
+// Guards the UI against a form with dozens of custom fields.
+const MAX_BREAKDOWNS = 6
+
 const DAY = 86_400_000
 
 const chartConfig = { leads: { label: 'Leads', color: 'var(--data)' } } satisfies ChartConfig
 
-function getRangeDates(range: TimeRange) {
-  const end = new Date(NOW)
-  const start = new Date(NOW)
+// Only ID-shaped queries hit the by-id endpoint; names, emails and phone
+// numbers stay local. Covers `sub_02400`, UUIDs, and bare numeric IDs.
+const SUBMISSION_ID_PATTERN =
+  /^(?:[a-z]{2,10}[_-][a-z0-9_-]{3,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d{6,})$/i
+
+/** `utmSource` / `product_line` -> `Utm source` / `Product line`, so whatever
+ *  casing convention the API uses still reads as a label. */
+const labelize = (key: string) =>
+  key.replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^./, (c) => c.toUpperCase())
+
+function formatDetailValue(value: string | number | boolean) {
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value)) return formatDateTime(value)
+  return String(value)
+}
+
+function getRangeDates(range: TimeRange, now: Date) {
+  const end = new Date(now)
+  const start = new Date(now)
   start.setUTCHours(0, 0, 0, 0)
   if (range === 'Yesterday') {
     start.setUTCDate(start.getUTCDate() - 1)
@@ -53,8 +77,14 @@ function formatDayLabel(key: string) {
     .format(new Date(`${key}T00:00:00Z`))
 }
 
-const statusClass = (status: Lead['status']) => `status-${status.toLowerCase()}`
-const statusVar = (status: Lead['status']) => `var(--st-${status.toLowerCase()})`
+// Only the known stages have a palette entry; anything else renders neutral
+// rather than falling back to an undefined custom property (i.e. invisible).
+const isKnownStatus = (status: string) =>
+  KNOWN_STATUSES.some((known) => known.toLowerCase() === status.toLowerCase())
+const statusClass = (status: string) =>
+  isKnownStatus(status) ? `status-${status.toLowerCase()}` : 'status-other'
+const statusVar = (status: string) =>
+  isKnownStatus(status) ? `var(--st-${status.toLowerCase()})` : 'var(--text-3)'
 
 /** Counts values of one dimension, largest first. */
 function tally(leads: Lead[], pick: (lead: Lead) => string | undefined) {
@@ -164,12 +194,15 @@ function BarList({ rows, colorFor, emptyLabel }: {
 }
 
 export default function Page() {
-  const { leads: apiLeads, loading: apiLoading, fetchLeads } = useLeadsStore()
+  const {
+    leads: apiLeads, loading: apiLoading, fetchLeads,
+    submission, submissionLoading, submissionError, fetchSubmissionById, clearSubmission,
+  } = useLeadsStore()
   const [environment, setEnvironment] = useState<Environment>('Prod')
   const [timeRange, setTimeRange] = useState<TimeRange>('Last 7 days')
-  const [breakdown, setBreakdown] = useState<Breakdown>('campaign')
+  const [breakdown, setBreakdown] = useState<string | null>(null)
   const [search, setSearch] = useState('')
-  const [status, setStatus] = useState<string>('All statuses')
+  const [status, setStatus] = useState<string>(ALL_STATUSES)
   const [pageSize, setPageSize] = useState(25)
   const [page, setPage] = useState(0)
   const [refreshing, setRefreshing] = useState(false)
@@ -178,8 +211,76 @@ export default function Page() {
 
   useEffect(() => { fetchLeads(environment, pageSize) }, [environment, pageSize, fetchLeads])
 
-  const dateRange = useMemo(() => getRangeDates(timeRange), [timeRange])
-  const busy = refreshing || apiLoading
+  // Read the clock on the client only: baking build time into the prerendered
+  // HTML would both desync hydration and pin the window to the build date.
+  const [now, setNow] = useState<Date | null>(null)
+  useEffect(() => { setNow(new Date()) }, [])
+
+  // Breakdown dimensions come from the data, so a form with different custom
+  // fields populates the card and the table columns without a code change.
+  const breakdownFields = useMemo(() => {
+    const seen = new Set<string>()
+    for (const lead of apiLeads) for (const key of Object.keys(lead.dynamic)) seen.add(key)
+    const preferred = PREFERRED_BREAKDOWNS.filter((key) => seen.has(key))
+    const distinct = (key: string) =>
+      new Set(apiLeads.map((lead) => lead.dynamic[key]).filter(Boolean)).size
+    const rest = [...seen]
+      .filter((key) => !preferred.includes(key))
+      // Fewest distinct values first — those group into a readable chart,
+      // whereas a near-unique field (an amount, a note) does not.
+      .sort((a, b) => distinct(a) - distinct(b) || a.localeCompare(b))
+    return [...preferred, ...rest].slice(0, MAX_BREAKDOWNS)
+  }, [apiLeads])
+  const activeBreakdown =
+    breakdown && breakdownFields.includes(breakdown) ? breakdown : breakdownFields[0] ?? null
+
+  // Same for statuses: known stages keep their order, anything else follows.
+  const statusValues = useMemo(() => {
+    const seen = new Set<string>()
+    for (const lead of apiLeads) if (lead.status) seen.add(lead.status)
+    const rest = [...seen].filter((value) => !KNOWN_STATUSES.includes(value)).sort()
+    // When the data speaks the canonical vocabulary, keep every stage on
+    // screen even at zero — an absent row reads as "no data" rather than
+    // "zero leads". A pipeline with its own vocabulary shows only its own.
+    const base = KNOWN_STATUSES.some((value) => seen.has(value)) ? KNOWN_STATUSES : []
+    return seen.size ? [...base, ...rest] : KNOWN_STATUSES
+  }, [apiLeads])
+  const statusOptions = useMemo(() => [ALL_STATUSES, ...statusValues], [statusValues])
+
+  // An ID-shaped search term, or an open row, is a request for the full record
+  // from GET /submissionbyid. Both funnel through one id so the two never race.
+  const submissionQuery = SUBMISSION_ID_PATTERN.test(search.trim()) ? search.trim() : null
+  const activeSubmissionId = selectedLead?.submissionId ?? submissionQuery
+  const lastFetchedRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!activeSubmissionId) {
+      lastFetchedRef.current = null
+      clearSubmission()
+      return
+    }
+    const key = `${environment}:${activeSubmissionId.toLowerCase()}`
+    if (lastFetchedRef.current === key) return
+    // Debounce typing; opening a row should feel immediate.
+    const timer = setTimeout(() => {
+      lastFetchedRef.current = key
+      fetchSubmissionById(environment, activeSubmissionId)
+    }, selectedLead ? 0 : 350)
+    return () => clearTimeout(timer)
+  }, [activeSubmissionId, environment, selectedLead, fetchSubmissionById, clearSubmission])
+
+  // Both consumers read the same store slot, so each checks the record is the
+  // one it asked for before rendering it.
+  const matchesActive = (id: string | null | undefined) =>
+    !!id && submission?.submissionId.toLowerCase() === id.toLowerCase()
+  const lookupMatch = matchesActive(submissionQuery) ? submission : null
+  const drawerDetail = matchesActive(selectedLead?.submissionId) ? submission : null
+  const lookupBusy = !!submissionQuery && !lookupMatch && (submissionLoading || !lastFetchedRef.current)
+
+  // Before the clock is read, an epoch window matches nothing — harmless,
+  // because leads have not loaded yet and the table shows its loading state.
+  const dateRange = useMemo(() => getRangeDates(timeRange, now ?? new Date(0)), [timeRange, now])
+  const busy = refreshing || apiLoading || !now
 
   // Time window scopes the whole dashboard; search + status scope only the table.
   const rangeLeads = useMemo(() => apiLeads.filter((lead) => {
@@ -187,22 +288,27 @@ export default function Page() {
     return at >= dateRange.start.getTime() && at <= dateRange.end.getTime()
   }), [apiLeads, dateRange])
 
+  // Switching environment can retire the selected status; treating a status
+  // that no longer exists as "All" avoids an unexplained empty table.
+  const activeStatus = statusValues.includes(status) ? status : ALL_STATUSES
+
   const filteredLeads = useMemo(() => {
     const needle = search.trim().toLowerCase()
     return rangeLeads.filter((lead) => {
-      if (status !== 'All statuses' && lead.status !== status) return false
+      if (activeStatus !== ALL_STATUSES && lead.status !== activeStatus) return false
       if (!needle) return true
       const haystack = `${lead.firstName} ${lead.lastName} ${lead.email} ${lead.phoneNumber} ${lead.submissionId} ${Object.values(lead.dynamic).join(' ')}`
       return haystack.toLowerCase().includes(needle)
     })
-  }, [rangeLeads, search, status])
+  }, [rangeLeads, search, activeStatus])
 
   const stats = useMemo(() => {
-    const byStatus = Object.fromEntries(statusOrder.map((key) => [key, 0])) as Record<string, number>
+    const byStatus = Object.fromEntries(statusValues.map((key) => [key, 0])) as Record<string, number>
     for (const lead of rangeLeads) byStatus[lead.status] = (byStatus[lead.status] ?? 0) + 1
     const total = rangeLeads.length
-    return { total, byStatus, qualifiedRate: total ? Math.round((byStatus.Qualified / total) * 100) : 0 }
-  }, [rangeLeads])
+    // "Qualified" may not exist in a given pipeline; the tile reads 0 then.
+    return { total, byStatus, qualifiedRate: total ? Math.round(((byStatus.Qualified ?? 0) / total) * 100) : 0 }
+  }, [rangeLeads, statusValues])
 
   const trend = useMemo(() => {
     const counts = new Map<string, number>()
@@ -223,21 +329,27 @@ export default function Page() {
   }, [rangeLeads, dateRange])
 
   const breakdownRows = useMemo(
-    () => tally(rangeLeads, (lead) => lead.dynamic[breakdown]),
-    [rangeLeads, breakdown],
+    () => (activeBreakdown ? tally(rangeLeads, (lead) => lead.dynamic[activeBreakdown]) : []),
+    [rangeLeads, activeBreakdown],
   )
   // Every stage stays on screen, including the empty ones — a missing row reads
   // as "no data" rather than "zero leads".
   const statusRows = useMemo(
-    () => statusOrder.map((label) => ({ label, value: stats.byStatus[label] ?? 0 })),
-    [stats],
+    () => statusValues.map((label) => ({ label, value: stats.byStatus[label] ?? 0 })),
+    [stats, statusValues],
   )
 
-  const visibleLeads = useMemo(
-    () => filteredLeads.slice(page * pageSize, page * pageSize + pageSize),
-    [filteredLeads, page, pageSize],
+  // An exact ID lookup replaces the local rows and ignores the window/status
+  // filters — a valid ID outside the current window should not read as missing.
+  const tableLeads = useMemo(
+    () => (lookupMatch ? [lookupMatch as Lead] : filteredLeads),
+    [lookupMatch, filteredLeads],
   )
-  const totalPages = Math.max(1, Math.ceil(filteredLeads.length / pageSize))
+  const visibleLeads = useMemo(
+    () => tableLeads.slice(page * pageSize, page * pageSize + pageSize),
+    [tableLeads, page, pageSize],
+  )
+  const totalPages = Math.max(1, Math.ceil(tableLeads.length / pageSize))
 
   const columns = useMemo<ColumnDef<Lead>[]>(() => [
     { accessorKey: 'firstName', header: 'First name' },
@@ -247,12 +359,12 @@ export default function Page() {
     { accessorKey: 'submissionId', header: 'Submission ID' },
     { accessorKey: 'updatedAt', header: 'Updated at', cell: ({ getValue }) => formatDateTime(getValue<string>()) },
     { accessorKey: 'status', header: 'Status' },
-    ...breakdowns.map((field) => ({
+    ...breakdownFields.map((field) => ({
       id: field,
-      header: field[0].toUpperCase() + field.slice(1),
-      accessorFn: (row: Lead) => row.dynamic[field],
+      header: labelize(field),
+      accessorFn: (row: Lead) => row.dynamic[field] ?? '',
     })),
-  ], [])
+  ], [breakdownFields])
   const coreRowModel = useMemo(() => getCoreRowModel(), [])
   const table = useReactTable({ data: visibleLeads, columns, getCoreRowModel: coreRowModel })
 
@@ -263,15 +375,15 @@ export default function Page() {
   }, [environment, pageSize, fetchLeads])
 
   function exportCsv() {
-    const cols = ['firstName', 'lastName', 'email', 'phoneNumber', 'submissionId', 'updatedAt', 'status', ...breakdowns]
+    const cols = ['firstName', 'lastName', 'email', 'phoneNumber', 'submissionId', 'updatedAt', 'status', ...breakdownFields]
     const cell = (lead: Lead, key: string) =>
-      (breakdowns as string[]).includes(key) ? lead.dynamic[key] ?? '' : String(lead[key as keyof Lead] ?? '')
+      breakdownFields.includes(key) ? lead.dynamic[key] ?? '' : String(lead[key as keyof Lead] ?? '')
     const escape = (value: string) => `"${value.replace(/"/g, '""')}"`
-    const csv = [cols.join(','), ...filteredLeads.map((lead) => cols.map((key) => escape(cell(lead, key))).join(','))].join('\n')
+    const csv = [cols.join(','), ...tableLeads.map((lead) => cols.map((key) => escape(cell(lead, key))).join(','))].join('\n')
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
     const link = document.createElement('a')
     link.href = url
-    link.download = `leads-${environment.toLowerCase()}-${dayKey(NOW)}.csv`
+    link.download = `leads-${environment.toLowerCase()}-${dayKey(now ?? new Date())}.csv`
     link.click()
     URL.revokeObjectURL(url)
   }
@@ -304,18 +416,21 @@ export default function Page() {
             <button className="chip icon-only" onClick={() => setDark(!dark)} aria-label="Toggle dark mode">
               {dark ? <Sun /> : <Moon />}
             </button>
-            <button className="btn-accent" onClick={exportCsv} disabled={!filteredLeads.length}>
+            <button className="btn-accent" onClick={exportCsv} disabled={!tableLeads.length}>
               <Download />Export CSV
             </button>
           </header>
 
           <section className="kpi-row" aria-label="Lead summary">
             <StatTile label="Leads" value={stats.total} sub={timeRange.toLowerCase()} />
-            {statusOrder.map((key) => (
-              <StatTile key={key} label={key} value={stats.byStatus[key]} dot={statusVar(key)}
-                sub={stats.total ? `${Math.round((stats.byStatus[key] / stats.total) * 100)}% of total` : '—'} />
+            {statusValues.map((key) => (
+              <StatTile key={key} label={key} value={stats.byStatus[key] ?? 0} dot={statusVar(key)}
+                sub={stats.total ? `${Math.round(((stats.byStatus[key] ?? 0) / stats.total) * 100)}% of total` : '—'} />
             ))}
-            <StatTile label="Qualified rate" value={`${stats.qualifiedRate}%`} sub={`${stats.byStatus.Qualified}/${stats.total} leads`} />
+            {statusValues.includes('Qualified') && (
+              <StatTile label="Qualified rate" value={`${stats.qualifiedRate}%`}
+                sub={`${stats.byStatus.Qualified ?? 0}/${stats.total} leads`} />
+            )}
           </section>
 
           <section className="card" aria-label="Submissions over time">
@@ -339,7 +454,10 @@ export default function Page() {
                       domain={[0, (max: number) => Math.max(1, Math.ceil(max * 1.2))]}
                       tick={{ fill: 'var(--text-3)', fontSize: 11 }} />
                     <ChartTooltip cursor={{ fill: 'var(--raised)' }} content={<ChartTooltipContent indicator="dot" />} />
-                    <Bar dataKey="leads" fill="var(--data)" radius={[4, 4, 0, 0]} maxBarSize={34} />
+                    {/* Entry animation is off: recharts restarts it on every re-render, so
+                        bars settled at a fraction of their true height. */}
+                    <Bar dataKey="leads" fill="var(--data)" radius={[4, 4, 0, 0]} maxBarSize={34}
+                      isAnimationActive={false} />
                   </BarChart>
                 </ChartContainer>
               )}
@@ -349,17 +467,21 @@ export default function Page() {
           <section className="split">
             <div className="card">
               <div className="card-head">
-                <div><h2>Top {breakdown}s</h2><p>Share of leads in window</p></div>
+                <div>
+                  <h2>{activeBreakdown ? `Top ${labelize(activeBreakdown).toLowerCase()}s` : 'Breakdown'}</h2>
+                  <p>Share of leads in window</p>
+                </div>
                 <div className="seg">
-                  {breakdowns.map((field) => (
-                    <button key={field} className={breakdown === field ? 'selected' : ''} onClick={() => setBreakdown(field)}>
-                      {field[0].toUpperCase() + field.slice(1)}
+                  {breakdownFields.map((field) => (
+                    <button key={field} className={field === activeBreakdown ? 'selected' : ''} onClick={() => setBreakdown(field)}>
+                      {labelize(field)}
                     </button>
                   ))}
                 </div>
               </div>
               <div className="card-body">
-                <BarList rows={breakdownRows} emptyLabel={`No ${breakdown} data in this window`} />
+                <BarList rows={breakdownRows}
+                  emptyLabel={activeBreakdown ? `No ${labelize(activeBreakdown).toLowerCase()} data in this window` : 'No custom fields in this data'} />
               </div>
             </div>
 
@@ -369,7 +491,7 @@ export default function Page() {
                 <Layers style={{ width: 14, color: 'var(--text-3)' }} />
               </div>
               <div className="card-body">
-                <BarList rows={statusRows} colorFor={(label) => statusVar(label as Lead['status'])}
+                <BarList rows={statusRows} colorFor={statusVar}
                   emptyLabel="No leads in this window" />
               </div>
             </div>
@@ -390,10 +512,21 @@ export default function Page() {
                     placeholder="Search leads, fields, or IDs" aria-label="Search leads" />
                   {search && <button onClick={() => { setSearch(''); resetPage() }} aria-label="Clear search"><X style={{ width: 13 }} /></button>}
                 </div>
-                <Dropdown ariaLabel="Status filter" value={status} options={statuses}
+                <Dropdown ariaLabel="Status filter" value={activeStatus} options={statusOptions}
                   onChange={(next) => { setStatus(next); resetPage() }} />
               </div>
             </div>
+
+            {lookupMatch && (
+              <div className="lookup-note">
+                <Hash />
+                <span>
+                  Exact match from the submission API — time window and status filters
+                  don’t apply to an ID lookup.
+                </span>
+                <button onClick={() => { setSearch(''); resetPage() }}>Clear</button>
+              </div>
+            )}
 
             <div className="table-wrap">
               {busy ? (
@@ -401,10 +534,20 @@ export default function Page() {
                   <Loader2 className="spin" /><strong>Fetching leads from {environment}</strong>
                   <span>Authenticating and requesting the selected UTC window…</span>
                 </div>
+              ) : lookupBusy ? (
+                <div className="state-block">
+                  <Loader2 className="spin" /><strong>Looking up submission</strong>
+                  <span>Fetching <code>{submissionQuery}</code> from the {environment} submission API…</span>
+                </div>
               ) : visibleLeads.length === 0 ? (
                 <div className="state-block">
-                  <Search /><strong>No leads found</strong>
-                  <span>Try a wider time window, or clear your search and filters.</span>
+                  {submissionQuery ? <CircleAlert /> : <Search />}
+                  <strong>{submissionQuery ? 'Submission not found' : 'No leads found'}</strong>
+                  <span>
+                    {submissionQuery
+                      ? submissionError ?? `No submission matches ${submissionQuery} in ${environment}.`
+                      : 'Try a wider time window, or clear your search and filters.'}
+                  </span>
                 </div>
               ) : (
                 <table>
@@ -433,7 +576,7 @@ export default function Page() {
                                 </span>
                               ) : id === 'submissionId' ? (
                                 <code>{cell.getValue<string>()}</code>
-                              ) : (breakdowns as string[]).includes(id) ? (
+                              ) : breakdownFields.includes(id) ? (
                                 <span className="tag">{cell.getValue<string>()}</span>
                               ) : rendered}
                             </td>
@@ -448,8 +591,8 @@ export default function Page() {
 
             <div className="table-footer">
               <span className="num">
-                Showing <strong>{filteredLeads.length ? page * pageSize + 1 : 0}–{Math.min((page + 1) * pageSize, filteredLeads.length)}</strong>
-                {' '}of <strong>{filteredLeads.length}</strong> leads
+                Showing <strong>{tableLeads.length ? page * pageSize + 1 : 0}–{Math.min((page + 1) * pageSize, tableLeads.length)}</strong>
+                {' '}of <strong>{tableLeads.length}</strong> leads
               </span>
               <div className="pagination">
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -502,10 +645,45 @@ export default function Page() {
               <span className="drawer-label">Additional fields</span>
               <dl>
                 {Object.entries(selectedLead.dynamic).map(([key, value]) => (
-                  <div key={key}><dt>{key}</dt><dd>{value}</dd></div>
+                  <div key={key}><dt>{labelize(key)}</dt><dd>{value}</dd></div>
                 ))}
               </dl>
             </div>
+
+            <div className="drawer-section">
+              <span className="drawer-label">Submission details</span>
+              {!drawerDetail && submissionLoading ? (
+                <div className="drawer-loading"><Loader2 className="spin" />Fetching from the submission API…</div>
+              ) : drawerDetail?.detail && Object.keys(drawerDetail.detail).length ? (
+                <dl>
+                  {Object.entries(drawerDetail.detail).map(([key, value]) => (
+                    <div key={key}>
+                      <dt>{labelize(key)}</dt>
+                      <dd className={typeof value === 'number' ? 'num' : undefined}>{formatDetailValue(value)}</dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : (
+                <p className="drawer-muted">{submissionError ?? 'No additional detail returned for this submission.'}</p>
+              )}
+            </div>
+
+            {!!drawerDetail?.history?.length && (
+              <div className="drawer-section">
+                <span className="drawer-label">Activity</span>
+                <ol className="timeline">
+                  {drawerDetail.history.map((entry, index) => (
+                    <li key={`${entry.at}-${index}`}>
+                      <span className="timeline-dot" />
+                      <div>
+                        <strong>{entry.event}</strong>
+                        <time className="num">{formatDateTime(entry.at)}</time>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
           </aside>
         </>
       )}
