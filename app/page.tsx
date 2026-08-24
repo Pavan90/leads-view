@@ -6,8 +6,8 @@ import { useLeadsStore, type Lead, type Environment } from '@/lib/leads-store'
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts'
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart'
 import {
-  Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Download, Layers, Loader2,
-  Moon, RefreshCw, Search, Sun, X, Zap,
+  Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Download, Hash,
+  Layers, Loader2, Moon, RefreshCw, Search, Sun, X, Zap,
 } from 'lucide-react'
 
 type TimeRange = 'Today' | 'Yesterday' | 'Last 7 days' | 'Last 14 days' | 'Last 30 days'
@@ -25,6 +25,21 @@ const NOW = new Date('2026-08-23T16:42:00Z')
 const DAY = 86_400_000
 
 const chartConfig = { leads: { label: 'Leads', color: 'var(--data)' } } satisfies ChartConfig
+
+// Only ID-shaped queries hit the by-id endpoint; names, emails and phone
+// numbers stay local. Covers `sub_02400`, UUIDs, and bare numeric IDs.
+const SUBMISSION_ID_PATTERN =
+  /^(?:[a-z]{2,10}[_-][a-z0-9_-]{3,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|\d{6,})$/i
+
+/** `utmSource` -> `Utm source`, for rendering whatever keys the API returns. */
+const labelize = (key: string) =>
+  key.replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/^./, (c) => c.toUpperCase())
+
+function formatDetailValue(value: string | number | boolean) {
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No'
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value)) return formatDateTime(value)
+  return String(value)
+}
 
 function getRangeDates(range: TimeRange) {
   const end = new Date(NOW)
@@ -164,7 +179,10 @@ function BarList({ rows, colorFor, emptyLabel }: {
 }
 
 export default function Page() {
-  const { leads: apiLeads, loading: apiLoading, fetchLeads } = useLeadsStore()
+  const {
+    leads: apiLeads, loading: apiLoading, fetchLeads,
+    submission, submissionLoading, submissionError, fetchSubmissionById, clearSubmission,
+  } = useLeadsStore()
   const [environment, setEnvironment] = useState<Environment>('Prod')
   const [timeRange, setTimeRange] = useState<TimeRange>('Last 7 days')
   const [breakdown, setBreakdown] = useState<Breakdown>('campaign')
@@ -177,6 +195,36 @@ export default function Page() {
   const [selectedLead, setSelectedLead] = useState<Lead | null>(null)
 
   useEffect(() => { fetchLeads(environment, pageSize) }, [environment, pageSize, fetchLeads])
+
+  // An ID-shaped search term, or an open row, is a request for the full record
+  // from GET /submissionbyid. Both funnel through one id so the two never race.
+  const submissionQuery = SUBMISSION_ID_PATTERN.test(search.trim()) ? search.trim() : null
+  const activeSubmissionId = selectedLead?.submissionId ?? submissionQuery
+  const lastFetchedRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!activeSubmissionId) {
+      lastFetchedRef.current = null
+      clearSubmission()
+      return
+    }
+    const key = `${environment}:${activeSubmissionId.toLowerCase()}`
+    if (lastFetchedRef.current === key) return
+    // Debounce typing; opening a row should feel immediate.
+    const timer = setTimeout(() => {
+      lastFetchedRef.current = key
+      fetchSubmissionById(environment, activeSubmissionId)
+    }, selectedLead ? 0 : 350)
+    return () => clearTimeout(timer)
+  }, [activeSubmissionId, environment, selectedLead, fetchSubmissionById, clearSubmission])
+
+  // Both consumers read the same store slot, so each checks the record is the
+  // one it asked for before rendering it.
+  const matchesActive = (id: string | null | undefined) =>
+    !!id && submission?.submissionId.toLowerCase() === id.toLowerCase()
+  const lookupMatch = matchesActive(submissionQuery) ? submission : null
+  const drawerDetail = matchesActive(selectedLead?.submissionId) ? submission : null
+  const lookupBusy = !!submissionQuery && !lookupMatch && (submissionLoading || !lastFetchedRef.current)
 
   const dateRange = useMemo(() => getRangeDates(timeRange), [timeRange])
   const busy = refreshing || apiLoading
@@ -233,11 +281,17 @@ export default function Page() {
     [stats],
   )
 
-  const visibleLeads = useMemo(
-    () => filteredLeads.slice(page * pageSize, page * pageSize + pageSize),
-    [filteredLeads, page, pageSize],
+  // An exact ID lookup replaces the local rows and ignores the window/status
+  // filters — a valid ID outside the current window should not read as missing.
+  const tableLeads = useMemo(
+    () => (lookupMatch ? [lookupMatch as Lead] : filteredLeads),
+    [lookupMatch, filteredLeads],
   )
-  const totalPages = Math.max(1, Math.ceil(filteredLeads.length / pageSize))
+  const visibleLeads = useMemo(
+    () => tableLeads.slice(page * pageSize, page * pageSize + pageSize),
+    [tableLeads, page, pageSize],
+  )
+  const totalPages = Math.max(1, Math.ceil(tableLeads.length / pageSize))
 
   const columns = useMemo<ColumnDef<Lead>[]>(() => [
     { accessorKey: 'firstName', header: 'First name' },
@@ -267,7 +321,7 @@ export default function Page() {
     const cell = (lead: Lead, key: string) =>
       (breakdowns as string[]).includes(key) ? lead.dynamic[key] ?? '' : String(lead[key as keyof Lead] ?? '')
     const escape = (value: string) => `"${value.replace(/"/g, '""')}"`
-    const csv = [cols.join(','), ...filteredLeads.map((lead) => cols.map((key) => escape(cell(lead, key))).join(','))].join('\n')
+    const csv = [cols.join(','), ...tableLeads.map((lead) => cols.map((key) => escape(cell(lead, key))).join(','))].join('\n')
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
     const link = document.createElement('a')
     link.href = url
@@ -304,7 +358,7 @@ export default function Page() {
             <button className="chip icon-only" onClick={() => setDark(!dark)} aria-label="Toggle dark mode">
               {dark ? <Sun /> : <Moon />}
             </button>
-            <button className="btn-accent" onClick={exportCsv} disabled={!filteredLeads.length}>
+            <button className="btn-accent" onClick={exportCsv} disabled={!tableLeads.length}>
               <Download />Export CSV
             </button>
           </header>
@@ -339,7 +393,10 @@ export default function Page() {
                       domain={[0, (max: number) => Math.max(1, Math.ceil(max * 1.2))]}
                       tick={{ fill: 'var(--text-3)', fontSize: 11 }} />
                     <ChartTooltip cursor={{ fill: 'var(--raised)' }} content={<ChartTooltipContent indicator="dot" />} />
-                    <Bar dataKey="leads" fill="var(--data)" radius={[4, 4, 0, 0]} maxBarSize={34} />
+                    {/* Entry animation is off: recharts restarts it on every re-render, so
+                        bars settled at a fraction of their true height. */}
+                    <Bar dataKey="leads" fill="var(--data)" radius={[4, 4, 0, 0]} maxBarSize={34}
+                      isAnimationActive={false} />
                   </BarChart>
                 </ChartContainer>
               )}
@@ -395,16 +452,37 @@ export default function Page() {
               </div>
             </div>
 
+            {lookupMatch && (
+              <div className="lookup-note">
+                <Hash />
+                <span>
+                  Exact match from the submission API — time window and status filters
+                  don’t apply to an ID lookup.
+                </span>
+                <button onClick={() => { setSearch(''); resetPage() }}>Clear</button>
+              </div>
+            )}
+
             <div className="table-wrap">
               {busy ? (
                 <div className="state-block">
                   <Loader2 className="spin" /><strong>Fetching leads from {environment}</strong>
                   <span>Authenticating and requesting the selected UTC window…</span>
                 </div>
+              ) : lookupBusy ? (
+                <div className="state-block">
+                  <Loader2 className="spin" /><strong>Looking up submission</strong>
+                  <span>Fetching <code>{submissionQuery}</code> from the {environment} submission API…</span>
+                </div>
               ) : visibleLeads.length === 0 ? (
                 <div className="state-block">
-                  <Search /><strong>No leads found</strong>
-                  <span>Try a wider time window, or clear your search and filters.</span>
+                  {submissionQuery ? <CircleAlert /> : <Search />}
+                  <strong>{submissionQuery ? 'Submission not found' : 'No leads found'}</strong>
+                  <span>
+                    {submissionQuery
+                      ? submissionError ?? `No submission matches ${submissionQuery} in ${environment}.`
+                      : 'Try a wider time window, or clear your search and filters.'}
+                  </span>
                 </div>
               ) : (
                 <table>
@@ -448,8 +526,8 @@ export default function Page() {
 
             <div className="table-footer">
               <span className="num">
-                Showing <strong>{filteredLeads.length ? page * pageSize + 1 : 0}–{Math.min((page + 1) * pageSize, filteredLeads.length)}</strong>
-                {' '}of <strong>{filteredLeads.length}</strong> leads
+                Showing <strong>{tableLeads.length ? page * pageSize + 1 : 0}–{Math.min((page + 1) * pageSize, tableLeads.length)}</strong>
+                {' '}of <strong>{tableLeads.length}</strong> leads
               </span>
               <div className="pagination">
                 <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -502,10 +580,45 @@ export default function Page() {
               <span className="drawer-label">Additional fields</span>
               <dl>
                 {Object.entries(selectedLead.dynamic).map(([key, value]) => (
-                  <div key={key}><dt>{key}</dt><dd>{value}</dd></div>
+                  <div key={key}><dt>{labelize(key)}</dt><dd>{value}</dd></div>
                 ))}
               </dl>
             </div>
+
+            <div className="drawer-section">
+              <span className="drawer-label">Submission details</span>
+              {!drawerDetail && submissionLoading ? (
+                <div className="drawer-loading"><Loader2 className="spin" />Fetching from the submission API…</div>
+              ) : drawerDetail?.detail && Object.keys(drawerDetail.detail).length ? (
+                <dl>
+                  {Object.entries(drawerDetail.detail).map(([key, value]) => (
+                    <div key={key}>
+                      <dt>{labelize(key)}</dt>
+                      <dd className={typeof value === 'number' ? 'num' : undefined}>{formatDetailValue(value)}</dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : (
+                <p className="drawer-muted">{submissionError ?? 'No additional detail returned for this submission.'}</p>
+              )}
+            </div>
+
+            {!!drawerDetail?.history?.length && (
+              <div className="drawer-section">
+                <span className="drawer-label">Activity</span>
+                <ol className="timeline">
+                  {drawerDetail.history.map((entry, index) => (
+                    <li key={`${entry.at}-${index}`}>
+                      <span className="timeline-dot" />
+                      <div>
+                        <strong>{entry.event}</strong>
+                        <time className="num">{formatDateTime(entry.at)}</time>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
           </aside>
         </>
       )}

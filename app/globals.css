@@ -5,9 +5,9 @@
 
 /* ---------------------------------------------------------------------------
    Design tokens
-   UI accent is orange; DATA is always blue (one hue, sequential) so brand
-   colour is never mistaken for an encoded value. Status hues come from the
-   validated palette and always ship beside a text label.
+   Brand green (#034638) drives both the UI accent and the DATA ramp — one hue,
+   sequential, so magnitude reads off lightness alone. Status hues stay
+   categorical and distinct from the brand, and always ship beside a text label.
 --------------------------------------------------------------------------- */
 :root {
   color-scheme: light;
@@ -23,16 +23,16 @@
   --text-2: #6c6c62;
   --text-3: #9a9a8f;
 
-  --accent: #eb6834;
-  --accent-hover: #d75524;
-  --accent-soft: #fdefe8;
+  --accent: #034638;
+  --accent-hover: #02352a;
+  --accent-soft: #e6efec;
 
-  --data: #2a78d6;
-  --data-soft: #cde2fb;
-  --data-track: #f4f7fb;
+  --data: #034638;
+  --data-soft: #c2d8d1;
+  --data-track: #f1f6f4;
 
   --st-new: #2a78d6;      --st-new-bg: #eaf2fd;      --st-new-ink: #1c5cab;
-  --st-contacted: #eda100; --st-contacted-bg: #fdf3e0; --st-contacted-ink: #855900;
+  --st-contacted: #6d5bd0; --st-contacted-bg: #eeebfa; --st-contacted-ink: #4b3aa8;
   --st-qualified: #1baf7a; --st-qualified-bg: #e4f6ef; --st-qualified-ink: #0a6b4a;
   --st-disqualified: #e34948; --st-disqualified-bg: #fdecec; --st-disqualified-ink: #a02c2b;
 
@@ -57,16 +57,16 @@
   --text-2: #a5a59a;
   --text-3: #76766c;
 
-  --accent: #f2743d;
-  --accent-hover: #eb6834;
-  --accent-soft: #2a1a12;
+  --accent: #4f9e88;
+  --accent-hover: #63b39c;
+  --accent-soft: #102b24;
 
-  --data: #3987e5;
-  --data-soft: #1d3f6b;
-  --data-track: #1f2530;
+  --data: #4f9e88;
+  --data-soft: #1c463b;
+  --data-track: #1c2422;
 
   --st-new: #3987e5;      --st-new-bg: #16273d;      --st-new-ink: #9cc4f2;
-  --st-contacted: #c98500; --st-contacted-bg: #2f2411; --st-contacted-ink: #e8bc63;
+  --st-contacted: #8f7fe0; --st-contacted-bg: #241f3d; --st-contacted-ink: #b9adf0;
   --st-qualified: #199e70; --st-qualified-bg: #122c23; --st-qualified-ink: #6cd3ac;
   --st-disqualified: #e66767; --st-disqualified-bg: #331b1b; --st-disqualified-ink: #f0a0a0;
 
@@ -312,6 +312,26 @@ td code { color: var(--text-3); font-family: ui-monospace, 'SF Mono', monospace;
 .state-block strong { color: var(--text); font-size: 13px; font-weight: 600; }
 .state-block .spin { color: var(--accent); }
 
+/* Banner shown when the table is displaying a by-id lookup rather than the
+   filtered list, so the bypassed filters are never a silent surprise. */
+.lookup-note {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px;
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 11px; font-weight: 500;
+  border-bottom: 1px solid var(--border-soft);
+}
+.lookup-note svg { width: 13px; flex-shrink: 0; }
+.lookup-note span { min-width: 0; }
+.lookup-note button {
+  margin-left: auto; flex-shrink: 0;
+  height: 22px; padding: 0 8px;
+  border: 1px solid currentColor; border-radius: 5px;
+  background: transparent; color: inherit;
+  font-size: 11px; font-weight: 600;
+}
+.lookup-note button:hover { background: var(--card); }
+
 /* --- drawer --------------------------------------------------------------- */
 .drawer-backdrop { position: fixed; inset: 0; z-index: 40; border: 0; background: rgb(20 20 16 / .32); cursor: default; }
 .lead-drawer {
@@ -335,6 +355,25 @@ td code { color: var(--text-3); font-family: ui-monospace, 'SF Mono', monospace;
 .drawer-section dt { color: var(--text-3); font-size: 12px; flex-shrink: 0; }
 .drawer-section dd { margin: 0; color: var(--text); font-size: 12px; font-weight: 500; text-align: right; overflow-wrap: anywhere; }
 .drawer-section dd code { font-family: ui-monospace, 'SF Mono', monospace; font-size: 11px; }
+
+.drawer-loading { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: 12px; }
+.drawer-loading .spin { width: 14px; color: var(--accent); animation: spin .7s linear infinite; }
+.drawer-muted { margin: 0; color: var(--text-3); font-size: 12px; }
+
+.timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.timeline li { position: relative; display: flex; gap: 10px; padding-bottom: 14px; }
+.timeline li:last-child { padding-bottom: 0; }
+/* Connector runs between dots, so the last entry gets no trailing line. */
+.timeline li:not(:last-child)::before {
+  content: ''; position: absolute; left: 3px; top: 12px; bottom: 0;
+  width: 1px; background: var(--border);
+}
+.timeline-dot {
+  width: 7px; height: 7px; margin-top: 4px; flex-shrink: 0;
+  border-radius: 50%; background: var(--accent);
+}
+.timeline strong { display: block; color: var(--text); font-size: 12px; font-weight: 600; }
+.timeline time { display: block; margin-top: 2px; color: var(--text-3); font-size: 11px; }
 
 /* --- footnote ------------------------------------------------------------- */
 .footnote { display: flex; align-items: center; gap: 10px; padding: 0 2px; color: var(--text-3); font-size: 11px; flex-wrap: wrap; }
